@@ -2,6 +2,7 @@ from dagster import Definitions, load_assets_from_modules, io_manager, StringSou
 
 from . import assets
 from .r2_io_managers import R2Config, R2GeoParquetManager
+from .resources import ArcGISFeatureServerResource
 
 all_assets = load_assets_from_modules([assets])
 
@@ -29,7 +30,9 @@ defs = Definitions(
         "access_key_id": {"env": "R2_ACCESS_KEY_ID"},
         "secret_access_key": {"env": "R2_SECRET_ACCESS_KEY"},
         "bucket_name": {"env": "R2_BUCKET_PRIMARY"}
-    })
+    }),
+    "feature_server": ArcGISFeatureServerResource(),
 
     }
 )
+

@@ -1,13 +1,13 @@
 from dagster import asset, AssetExecutionContext
 import geopandas as gpd
-import requests
+from .resources import ArcGISFeatureServerResource
 
 @asset(
     group_name='txdot',
     metadata={"tier": "landing", "source":"txdot"},
     io_manager_key="r2_geo_parquet_io_manager",
     )
-def texas_trunk_system(context: AssetExecutionContext):
+def texas_trunk_system(context: AssetExecutionContext, feature_server: ArcGISFeatureServerResource):
     """ Fetches the TXDoT Texas Trunk System containing a network of divided highways intented to become >= 4 lanes."""
     
     # Define query
@@ -18,11 +18,8 @@ def texas_trunk_system(context: AssetExecutionContext):
         'f': 'geojson',
         }
     
-    # Fetch data
-    response = requests.get(url, params=params)
-    data = response.json()
-    
-    # Construct geodataframe
-    gdf = gpd.GeoDataFrame.from_features(data['features'], crs="EPSG:4326")
+    # Fetch data and return geodataframe
+    gdf = feature_server.fetch_data(url=url, params=params, context=context)
 
     return gdf
+
