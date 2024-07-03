@@ -5,7 +5,14 @@ setup(
     packages=find_packages(exclude=["poboy_pipeline_example_tests"]),
     install_requires=[
         "dagster",
-        "dagster-cloud"
+        "dagster-cloud",
+        "geopandas",
+        "boto3",
     ],
     extras_require={"dev": ["dagster-webserver", "pytest"]},
 )
+
+
+
+
+
