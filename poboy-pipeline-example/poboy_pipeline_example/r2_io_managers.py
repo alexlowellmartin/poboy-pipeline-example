@@ -3,8 +3,22 @@ import boto3
 import io
 from datetime import datetime, timezone
 import geopandas as gpd
+import pandas as pd
 from upath import UPath
-from typing import Union, Optional
+from typing import Union, Optional, Any, Dict
+
+
+from dagster import ConfigurableIOManager, InputContext, OutputContext, MetadataValue, AssetExecutionContext
+from dagster._core.storage.upath_io_manager import UPathIOManager
+from upath import UPath
+import boto3
+import geopandas as gpd
+import pyarrow as pa
+import pyarrow.parquet as pq
+from datetime import datetime, timezone
+from io import BytesIO
+
+
 
 class R2Config(Config):
     """
@@ -20,26 +34,15 @@ class R2Config(Config):
     access_key_id: str
     secret_access_key: str
     bucket_name: str
-    
+
 
 class R2GeoParquetManager(UPathIOManager):
     """
     Custom IO Manager for handling GeoParquet files stored in Cloudflare R2.
-
-    This manager supports various partition types and handles cases where data might be missing.
-
-    Attributes:
-        extension (str): The file extension for GeoParquet files.
     """
     extension = ".geoparquet"
 
     def __init__(self, config: R2Config):
-        """
-        Initialize the R2GeoParquetManager.
-
-        Args:
-            config (R2Config): The configuration object for R2 storage.
-        """
         self.config = config
         super().__init__(base_path=UPath(f"https://{self.config.endpoint_url}/{self.config.bucket_name}"))
         self.r2 = boto3.client(
@@ -50,18 +53,7 @@ class R2GeoParquetManager(UPathIOManager):
         )
 
     def _get_r2_key(self, context: Union[InputContext, OutputContext], extension: str) -> str:
-        """
-        Generate the R2 key for storing or retrieving an object.
-
-        Args:
-            context (Union[InputContext, OutputContext]): The context for the operation.
-            extension (str): The file extension.
-
-        Returns:
-            str: The generated R2 key.
-        """
         if isinstance(context, InputContext) and context.upstream_output:
-            # Use upstream asset's metadata for input contexts
             metadata = context.upstream_output.metadata
             asset_key = context.upstream_output.asset_key
         else:
@@ -71,31 +63,37 @@ class R2GeoParquetManager(UPathIOManager):
         tier = metadata.get("tier", "default_tier")
         source = metadata.get("source", "default_source")
         asset_name = asset_key.path[-1]
-        partition_key = context.asset_partition_key if hasattr(context, 'asset_partition_key') else ''
-        
-        context.log.info(f"Generating R2 key with tier: {tier}, source: {source}, asset_name: {asset_name}, partition_key: {partition_key}")
-        
-        return f'{tier}/{source}/{asset_name}/{partition_key}{extension}'
 
+        if context.has_asset_partitions:
+            partition_key = self._format_partition_key(context.asset_partition_key)
+            r2_key = f'{tier}/{source}/{asset_name}/{partition_key}{extension}'
+        else:
+            r2_key = f'{tier}/{source}/{asset_name}/{asset_name}{extension}'
+
+        context.log.info(f"Generated R2 key: {r2_key}")
+        return r2_key
+
+    def _format_partition_key(self, partition_key: Any) -> str:
+        if isinstance(partition_key, str):
+            return partition_key
+        elif isinstance(partition_key, TimeWindow):
+            return f"{partition_key.start.isoformat()}_{partition_key.end.isoformat()}"
+        elif isinstance(partition_key, dict):
+            return "/".join(f"{k}={v}" for k, v in sorted(partition_key.items()))
+        elif partition_key is None:
+            return ""
+        else:
+            return str(partition_key)
 
     def dump_to_path(self, context: OutputContext, obj: gpd.GeoDataFrame, path: UPath):
-        """
-        Save a GeoDataFrame to Cloudflare R2.
-
-        Args:
-            context (OutputContext): The context for the operation.
-            obj (gpd.GeoDataFrame): The GeoDataFrame to save.
-            path (UPath): The path where the object will be saved.
-        """
         try:
             object_key = self._get_r2_key(context, self.extension)
             bucket = self.config.bucket_name
             context.log.info(f"Preparing to upload to bucket: {bucket}, object_key: {object_key}")
-            
+
             buffer = io.BytesIO()
             obj.to_parquet(buffer, engine='pyarrow', index=False, compression='snappy')
             buffer.seek(0)
-            
             self.r2.upload_fileobj(buffer, bucket, object_key)
             context.log.info(f"Uploaded file to {bucket}/{object_key}")
         except Exception as e:
@@ -103,16 +101,6 @@ class R2GeoParquetManager(UPathIOManager):
             raise
 
     def load_from_path(self, context: InputContext, path: UPath) -> gpd.GeoDataFrame:
-        """
-        Load a GeoDataFrame from Cloudflare R2.
-
-        Args:
-            context (InputContext): The context for the operation.
-            path (UPath): The path from which the object will be loaded.
-
-        Returns:
-            gpd.GeoDataFrame: The loaded GeoDataFrame, or an empty GeoDataFrame if no data is available.
-        """
         try:
             object_key = self._get_r2_key(context, self.extension)
             bucket = self.config.bucket_name
@@ -130,48 +118,7 @@ class R2GeoParquetManager(UPathIOManager):
             buffer = io.BytesIO()
             self.r2.download_fileobj(bucket, object_key, buffer)
             buffer.seek(0)
-
             context.log.info(f"Successfully downloaded file from {bucket}/{object_key}")
-
-            gdf = gpd.read_parquet(buffer)
-            context.log.info(f"Loaded GeoDataFrame with {len(gdf)} records")
-            return gdf
-        except Exception as e:
-            context.log.error(f"Failed to download file: {e}")
-            raise
-
-    def load_by_key(self, context: InputContext, key: str) -> Optional[gpd.GeoDataFrame]:
-        """
-        Load a GeoDataFrame from Cloudflare R2 using a specific key.
-
-        This method is useful when you know the exact location of the data you want to load.
-
-        Args:
-            context (InputContext): The context for the operation.
-            key (str): The specific R2 key to load the object from.
-
-        Returns:
-            Optional[gpd.GeoDataFrame]: The loaded GeoDataFrame, or None if no data is available.
-        """
-        try:
-            bucket = self.config.bucket_name
-            context.log.info(f"Attempting to download from bucket: {bucket}, object_key: {key}")
-
-            try:
-                self.r2.head_object(Bucket=bucket, Key=key)
-            except self.r2.exceptions.ClientError as e:
-                if e.response['Error']['Code'] == "404":
-                    context.log.warning(f"No data available for {key} in bucket {bucket}")
-                    return None
-                else:
-                    raise
-
-            buffer = io.BytesIO()
-            self.r2.download_fileobj(bucket, key, buffer)
-            buffer.seek(0)
-
-            context.log.info(f"Successfully downloaded file from {bucket}/{key}")
-
             gdf = gpd.read_parquet(buffer)
             context.log.info(f"Loaded GeoDataFrame with {len(gdf)} records")
             return gdf
@@ -180,146 +127,60 @@ class R2GeoParquetManager(UPathIOManager):
             raise
 
     def get_path(self, context: Union[InputContext, OutputContext]) -> UPath:
-        """
-        Generate the full path for an object in Cloudflare R2.
-
-        Args:
-            context (Union[InputContext, OutputContext]): The context for the operation.
-
-        Returns:
-            UPath: The full path for the object.
-        """
         r2_key = self._get_r2_key(context, self.extension)
         return self._base_path / r2_key
 
-    def handle_output(self, context: OutputContext, obj: Optional[gpd.GeoDataFrame]):
-        """
-        Handle the output of an asset operation.
-
-        This method skips saving empty or None GeoDataFrames.
-
-        Args:
-            context (OutputContext): The context for the operation.
-            obj (Optional[gpd.GeoDataFrame]): The GeoDataFrame to handle, or None if no data is available.
-        """
+    def handle_output(self, context: OutputContext, obj: gpd.GeoDataFrame):
         if obj is not None and not obj.empty:
             super().handle_output(context, obj)
         else:
             context.log.info(f"Skipping output for empty or None GeoDataFrame in partition {context.asset_partition_key}")
-            
-class R2GeoParquetManager2(UPathIOManager):
+
+    def load_input(self, context: InputContext) -> gpd.GeoDataFrame:
+        # Check if the asset itself is partitioned
+        if context.has_asset_partitions:
+            # If the asset is partitioned, load all partitions and concatenate them
+            if len(context.asset_partition_keys) == 0:
+                return gpd.GeoDataFrame()
+            else:
+                gdfs = [
+                    self.load_from_path(
+                        context,
+                        self.get_path(context)
+                    )
+                    for partition_key in context.asset_partition_keys
+                ]
+                return pd.concat(gdfs, ignore_index=True) if gdfs else gpd.GeoDataFrame()
+        else:
+            # If the asset is not partitioned, check if it depends on partitioned upstream assets
+            upstream_partition_keys = context.asset_partition_keys_for_input(context.name)
+            if upstream_partition_keys:
+                # Load all partitions from the upstream asset and concatenate them
+                gdfs = []
+                for partition_key in upstream_partition_keys:
+                    partition_context = context  # Use the current context as a base
+                    path = self.get_path(partition_context)
+                    gdf = self.load_from_path(partition_context, path)
+                    if not gdf.empty:
+                        gdfs.append(gdf)
+                return pd.concat(gdfs, ignore_index=True) if gdfs else gpd.GeoDataFrame()
+            else:
+                # Regular unpartitioned asset
+                path = self.get_path(context)
+                return self.load_from_path(context, path)
     """
-    Custom IO Manager for handling GeoParquet files stored in Cloudflare R2.
-
-    Attributes:
-        extension (str): The file extension for GeoParquet files.
-    """
-    extension = ".geoparquet"
-
-    def __init__(self, config: R2Config):
-        """
-        Initialize the R2GeoParquetManager.
-
-        Args:
-            config (R2Config): The configuration object for R2 storage.
-        """
-        self.config = config
-        super().__init__(base_path=UPath(f"https://{self.config.endpoint_url}/{self.config.bucket_name}"))
-        self.r2 = boto3.client(
-            's3',
-            aws_access_key_id=self.config.access_key_id,
-            aws_secret_access_key=self.config.secret_access_key,
-            endpoint_url=self.config.endpoint_url
-        )
-    
-    def _get_r2_key(self, context, extension: str, timestamp: bool = False) -> str:
-        """
-        Generate the R2 key for storing or retrieving an object.
-
-        Args:
-            context (Union[InputContext, OutputContext]): The context for the operation.
-            extension (str): The file extension.
-            timestamp (bool): Whether to include a timestamp in the key.
-
-        Returns:
-            str: The generated R2 key.
-        """
-        metadata = context.metadata
-        tier = metadata.get("tier", "default_tier")
-        source = metadata.get("source", "default_source")
-        asset_name = context.asset_key.path[-1]
-        ts = datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f') if timestamp else ""
-        context.log.info("R2 keys fetched.")
-        return f'{tier}/{source}/{asset_name}/{asset_name}-{ts}{extension}'
-    
-    def dump_to_path(self, context: OutputContext, obj: gpd.GeoDataFrame, path: UPath):
-        """
-        Save a GeoDataFrame to Cloudflare R2.
-
-        Args:
-            context (OutputContext): The context for the operation.
-            obj (gpd.GeoDataFrame): The GeoDataFrame to save.
-            path (UPath): The path where the object will be saved.
-        """
-        try:
-            object_key = self._get_r2_key(context, self.extension, timestamp=True)
-            bucket = self.config.bucket_name
-            context.log.info(f"Preparing to upload to bucket: {bucket}, object_key: {object_key}")
-            
-            # Convert GeoDataFrame to an in-memory buffer
-            buffer = io.BytesIO()
-            obj.to_parquet(buffer, engine='pyarrow', index=False)
-            buffer.seek(0)  # Reset buffer position to the beginning
-            context.log.info("GeoDataFrame converted to in-memory buffer")
-            
-            # Upload the buffer to Cloudflare R2
-            self.r2.upload_fileobj(buffer, bucket, object_key)
-            context.log.info(f"Uploaded file to {bucket}/{object_key}")
-            
-        except Exception as e:
-            context.log.error(f"Failed to upload file: {e}")
-            raise
-    
-    def load_from_path(self, context: InputContext, path: UPath) -> gpd.GeoDataFrame:
-        """
-        Load a GeoDataFrame from Cloudflare R2.
-
-        Args:
-            context (InputContext): The context for the operation.
-            path (UPath): The path from which the object will be loaded.
-
-        Returns:
-            gpd.GeoDataFrame: The loaded GeoDataFrame.
-        """
-        try:
-            object_key = self._get_r2_key(context, self.extension)
-            bucket = self.config.bucket_name
-            context.log.info(f"Preparing to download from bucket: {bucket}, object_key: {object_key}")
-            
-            # Download the file to an in-memory buffer
-            buffer = io.BytesIO()
-            self.r2.download_fileobj(bucket, object_key, buffer)
-            buffer.seek(0)  # Reset buffer position to the beginning
-            context.log.info("Downloaded file into in-memory buffer")
-            
-            # Read the buffer into a GeoDataFrame and return
-            gdf = gpd.read_parquet(buffer)
-            context.log.info(f"Loaded GeoDataFrame with {len(gdf)} records")
-            return gdf
+    def get_metadata(self, context: OutputContext, obj: gpd.GeoDataFrame) -> Dict[str, MetadataValue]:
+        metadata = super().get_metadata(context, obj)
         
-        except Exception as e:
-            context.log.error(f"Failed to download file: {e}")
-            raise
+        # Add custom metadata
+        metadata.update({
+            "num_rows": MetadataValue.int(len(obj)),
+            "num_columns": MetadataValue.int(len(obj.columns)),
+            "crs": MetadataValue.text(str(obj.crs)),
+            "geometry_type": MetadataValue.text(obj.geometry.type.name),
+            "r2_key": MetadataValue.text(self._get_r2_key(context, self.extension)),
+            "file_size": MetadataValue.size(obj.memory_usage(deep=True).sum()),
+        })
 
-    def get_path(self, context: Union[InputContext, OutputContext]) -> UPath:
-        """
-        Generate the full path for an object in Cloudflare R2.
-
-        Args:
-            context (Union[InputContext, OutputContext]): The context for the operation.
-
-        Returns:
-            UPath: The full path for the object.
-        """
-        r2_key = self._get_r2_key(context, self.extension)
-        return self._base_path / r2_key
+        return metadata
+    """
