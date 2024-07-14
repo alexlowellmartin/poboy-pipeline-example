@@ -202,6 +202,58 @@ class CloudflareR2DataStore(ConfigurableResource):
         except Exception as e:
             context.log.error(f"Failed to read all partitions: {e}")
             raise
+        
+    def read_gpq_latest_snapshot(self, context: AssetExecutionContext, key_pattern: str) -> gpd.GeoDataFrame:
+        """
+        Load the latest snapshot GeoDataFrame from Cloudflare R2 based on a key pattern.
+
+        Args:
+            context (AssetExecutionContext): The context for the operation.
+            key_pattern (str): The key pattern to match snapshots.
+
+        Returns:
+            gpd.GeoDataFrame: The latest snapshot GeoDataFrame.
+        """
+        try:
+            paginator = self._r2.get_paginator('list_objects_v2')
+            pages = paginator.paginate(Bucket=self.bucket_name, Prefix=key_pattern)
+
+            latest_key = None
+            latest_timestamp = None
+
+            for page in pages:
+                if 'Contents' in page:
+                    for obj in page['Contents']:
+                        key = obj['Key']
+                        if key.endswith('.geoparquet'):
+                            # Extract timestamp from the key
+                            timestamp_str = key.split('snapshot=')[-1].replace('.geoparquet', '')
+                            timestamp = datetime.fromisoformat(timestamp_str)
+                            if latest_timestamp is None or timestamp > latest_timestamp:
+                                latest_timestamp = timestamp
+                                latest_key = key
+
+            if latest_key is None:
+                context.log.warning(f"No snapshots found for key pattern: {key_pattern}")
+                return gpd.GeoDataFrame()
+
+            gdf = self.read_gpq_single_key(context, latest_key)
+            context.log.info(f"Loaded latest snapshot from {latest_key}")
+
+            metadata = {
+                "r2_key_pattern": MetadataValue.text(key_pattern),
+                "r2_read_location": MetadataValue.text(str(self._base_path / latest_key)),
+                "r2_file_size_read": MetadataValue.text(format_size(obj['Size'])),
+                "r2_num_records_read": MetadataValue.int(len(gdf)),
+                "r2_columns_read": MetadataValue.json(list(gdf.columns)),
+                "r2_object_preview": MetadataValue.md(self._get_head_preview(gdf)),
+            }
+
+            context.add_output_metadata(metadata)
+            return gdf
+        except Exception as e:
+            context.log.error(f"Failed to read latest snapshot: {e}")
+            raise
 
     def _get_head_preview(self, gdf: gpd.GeoDataFrame, n: int = 5) -> str:
         """
