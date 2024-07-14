@@ -1,11 +1,10 @@
-from dagster import Definitions, load_assets_from_modules, io_manager, StringSource
+from dagster import Definitions, load_assets_from_modules, io_manager, StringSource, EnvVar, resource
 
 from . import assets
 from .r2_io_managers import R2Config, R2GeoParquetManager
-from .resources import ArcGISFeatureServerResource
+from .resources import ArcGISFeatureServerResource, CloudflareR2DataStore
 
 all_assets = load_assets_from_modules([assets])
-
 
 @io_manager(config_schema={
     "endpoint_url": StringSource,
@@ -31,6 +30,12 @@ defs = Definitions(
         "secret_access_key": {"env": "R2_SECRET_ACCESS_KEY"},
         "bucket_name": {"env": "R2_BUCKET_PRIMARY"}
     }),
+    "r2_datastore": CloudflareR2DataStore(
+            endpoint_url=EnvVar("R2_ENDPOINT_URL"),
+            access_key_id=EnvVar("R2_ACCESS_KEY_ID"),
+            secret_access_key=EnvVar("R2_SECRET_ACCESS_KEY"),
+            bucket_name=EnvVar("R2_BUCKET_PRIMARY")
+        ),
     "feature_server": ArcGISFeatureServerResource(),
 
     }

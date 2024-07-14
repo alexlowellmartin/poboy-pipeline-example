@@ -1,7 +1,7 @@
-from dagster import asset, AssetExecutionContext, AssetIn, TimeWindowPartitionsDefinition, DailyPartitionsDefinition
+from dagster import asset, AssetExecutionContext, AssetIn, TimeWindowPartitionsDefinition, AssetKey, AssetMaterialization
 import geopandas as gpd
 from datetime import datetime
-from .resources import ArcGISFeatureServerResource
+from .resources import CloudflareR2DataStore, ArcGISFeatureServerResource
 
 # Define yearly partitions starting from 2023
 yearly_partitions = TimeWindowPartitionsDefinition(
@@ -11,34 +11,22 @@ yearly_partitions = TimeWindowPartitionsDefinition(
     fmt="%Y"  # Format partition keys as YYYY
 )
 
-start_date = datetime(2023, 9, 1)
-end_date = datetime(2023, 9, 2)
-daily_partitions = DailyPartitionsDefinition(start_date=start_date, end_date=end_date)
-
-
 @asset(
-    group_name='txdot',
-    metadata={"tier": "landing", "source":"txdot"},
-    io_manager_key="r2_geo_parquet_io_manager",
-    partitions_def=daily_partitions,
+    group_name='raw_data',
+    metadata={"layer": "landing", "source": "txdot", "data_category": "vector", "segmentation": "partitions"},
+    partitions_def=yearly_partitions,
     )
-def texas_trunk_system(context: AssetExecutionContext, feature_server: ArcGISFeatureServerResource):
+def texas_trunk_system(context: AssetExecutionContext, feature_server: ArcGISFeatureServerResource, r2_datastore: CloudflareR2DataStore):
     """ Fetches the TXDoT Texas Trunk System containing a network of divided highways intented to become >= 4 lanes."""
     
-    # Declare partition key
-    partition_key = context.partition_key
-    context.log.info(f"Processing partition: {partition_key}")
-    
-    # Parse the partition key string into a datetime object
-    partition_date = datetime.strptime(partition_key, "%Y-%m-%d")
-    
-    # Format partition key to pass to query
-    formatted_partition_date = partition_date.strftime("%m-%d-%Y")
+    # Define annual partition key
+    year = context.partition_key
+    context.log.info(f"Processing partition for year: {year}")
     
     # Define query
     url="https://services.arcgis.com/KTcxiTD9dsQw4r7Z/arcgis/rest/services/TxDOT_Texas_Trunk_System/FeatureServer/0/query"
     params = {
-        'where': f"EXT_DATE = '{formatted_partition_date}'",
+        'where': f"EXTRACT(YEAR FROM EXT_DATE) = {year}",
         'outFields': '*',
         'f': 'geojson',
         }
@@ -46,74 +34,19 @@ def texas_trunk_system(context: AssetExecutionContext, feature_server: ArcGISFea
     # Fetch data and return geodataframe
     gdf = feature_server.fetch_data(url=url, params=params, context=context)
 
-    return gdf
+    # Write the GeoDataFrame to R2
+    r2_datastore.write_gpq(context, gdf)
 
-
-@asset(
-    group_name='txdot',
-    metadata={"tier": "landing", "source": "txdot"},
-    io_manager_key="r2_geo_parquet_io_manager",
-    partitions_def=yearly_partitions,
-)
-def texas_trunk_system_year(context: AssetExecutionContext, feature_server: ArcGISFeatureServerResource) -> gpd.GeoDataFrame:
-    """Fetches the TXDoT Texas Trunk System containing a network of divided highways intended to become >= 4 lanes."""
-    
-    year = context.partition_key
-    context.log.info(f"Processing partition for year: {year}")
-    
-    url = "https://services.arcgis.com/KTcxiTD9dsQw4r7Z/arcgis/rest/services/TxDOT_Texas_Trunk_System/FeatureServer/0/query"
-    params = {
-        'where': f"EXTRACT(YEAR FROM EXT_DATE) = {year}",
-        'outFields': '*',
-        'f': 'geojson',
-    }
-    
-    gdf = feature_server.fetch_data(url=url, params=params, context=context)
-
-    if gdf.empty:
-        context.log.info(f"No data available for year {year}")
-        return gpd.GeoDataFrame()
-
-    return gdf
 
 
 @asset(
-    group_name='txdot_processed',
-    metadata={"tier": "processed", "source": "txdot"},
-    io_manager_key="r2_geo_parquet_io_manager",
-    partitions_def=yearly_partitions,
-    ins={"trunk_system": AssetIn("texas_trunk_system")}
+    group_name='raw_data',
+    metadata={"layer": "landing", "source": "txdot", "data_category": "vector", "segmentation": "full_snapshots"},
 )
-def state_highways_trunk_system(context, trunk_system: gpd.GeoDataFrame):
-    if trunk_system.empty:
-        context.log.info(f"No data available for partition {context.partition_key}")
-        return gpd.GeoDataFrame()
-    
-    state_highways = trunk_system[trunk_system['RTE_PRFX'] == 'SH']
-    return state_highways
-
-
-@asset(
-    group_name='txdot_processed',
-    metadata={"tier": "processed", "source": "txdot"},
-    io_manager_key="r2_geo_parquet_io_manager",
-    ins={"trunk_system": AssetIn("texas_trunk_system")}
-)
-def state_highways_trunk_system_unpartitioned(context, trunk_system: gpd.GeoDataFrame):
-    if trunk_system.empty:
-        return gpd.GeoDataFrame()
-    state_highways = trunk_system[trunk_system['RTE_PRFX'] == 'SH']
-    return state_highways
-
-
-@asset(
-    group_name='txdot',
-    metadata={"tier": "landing", "source":"txdot"},
-    io_manager_key="r2_geo_parquet_io_manager",
-)
-def texas_county_boundaries(context: AssetExecutionContext, feature_server: ArcGISFeatureServerResource):
+def texas_county_boundaries(context: AssetExecutionContext, feature_server: ArcGISFeatureServerResource, r2_datastore: CloudflareR2DataStore):
     """Fetches the TXDoT polygon layer of the 254 Texas counties"""
     
+    # Define query
     url = "https://services.arcgis.com/KTcxiTD9dsQw4r7Z/arcgis/rest/services/Texas_County_Boundaries/FeatureServer/0/query?"
     params = {
         'where': '1=1',
@@ -121,20 +54,26 @@ def texas_county_boundaries(context: AssetExecutionContext, feature_server: ArcG
         'f': 'geojson',
     }
     
+    # Fetch data
     gdf = feature_server.fetch_data(url=url, params=params, context=context)
+    
+    # Write the GeoDataFrame to R2
+    r2_datastore.write_gpq(context, gdf)
+    
     return gdf
 
 
 @asset(
-    group_name='census_bureau',
-    metadata={"tier": "landing", "source":"census_bureau"},
-    io_manager_key="r2_geo_parquet_io_manager",
+    group_name='raw_data',
+    metadata={"layer": "landing", "source": "census_bureau", "data_category": "vector", "segmentation": "full_snapshots"},
 )
-def texas_acs_tract_median_household_income(context: AssetExecutionContext, feature_server: ArcGISFeatureServerResource):
-    """Fetches American Community Survey (ACS) about median household income by census tract in Texas."""
+def tx_med_household_income(context: AssetExecutionContext, feature_server: ArcGISFeatureServerResource, r2_datastore: CloudflareR2DataStore):
+    """Fetches American Community Survey (ACS) median household income by census tract in Texas."""
     
+    # Define envelope bounding box
     envelope = "-106.645646, 25.837377, -93.508292, 36.500704"
     
+    # Define query
     url="https://services.arcgis.com/P3ePLMYs2RVChkJx/ArcGIS/rest/services/ACS_Median_Income_by_Race_and_Age_Selp_Emp_Boundaries/FeatureServer/2/query?"
     params = {
         "geometryType": "esriGeometryEnvelope",
@@ -148,26 +87,31 @@ def texas_acs_tract_median_household_income(context: AssetExecutionContext, feat
         "outSR": "4326",
     }
     
+    # Fetch data
     gdf = feature_server.fetch_data(url=url, params=params, context=context)
+    
+    # Write the GeoDataFrame to R2
+    r2_datastore.write_gpq(context, gdf)
+    
     return gdf
 
 @asset(
     group_name='analytics',
-    metadata={"tier": "enriched", "source":"analytics"},
-    io_manager_key="r2_geo_parquet_io_manager",
-    ins={
-        "texas_trunk_system": AssetIn("texas_trunk_system"),
-        "texas_acs_tract_median_household_income": AssetIn("texas_acs_tract_median_household_income")
-    }
+    metadata={"layer": "enriched", "source": "analytics", "data_category": "vector", "segmentation": "full_snapshots"},
+    deps = [texas_trunk_system, tx_med_household_income]
 )
-def trunk_median_income(
-    context: AssetExecutionContext,
-    texas_trunk_system: gpd.GeoDataFrame,
-    texas_acs_tract_median_household_income: gpd.GeoDataFrame
-):
-    trunk_system_gdf = texas_trunk_system
-    acs_tract_gdf = texas_acs_tract_median_household_income
+def trunk_median_income(context: AssetExecutionContext, r2_datastore: CloudflareR2DataStore):
+    """Joins Texas trunk system to median household income. Filters by select counties."""
+
+    # Fetch trunk system
+    ts_key_pattern = "landing/txdot/vector/texas_trunk_system/partitions"
+    trunk_system = r2_datastore.read_gpq_all_partitions(context, ts_key_pattern)
     
-    combined_gdf = gpd.sjoin(trunk_system_gdf, acs_tract_gdf, how="inner", op="intersects")
+    # Fetch median income tracts
+    med_income_tracts_key = "landing/census_bureau/vector/tx_med_household_income/full_snapshots/snapshot=2024-07-14T15:29:10.742535.geoparquet"
+    med_income_tracts = r2_datastore.read_gpq_single_key(context, med_income_tracts_key)
     
+    combined_gdf = gpd.sjoin(med_income_tracts, trunk_system, how="inner", op="intersects")
+    
+    r2_datastore.write_gpq(context, combined_gdf)
     return combined_gdf
