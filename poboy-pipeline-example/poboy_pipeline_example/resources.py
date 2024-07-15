@@ -272,6 +272,9 @@ class CloudflareR2DataStore(ConfigurableResource):
         return preview_df.to_markdown()
 
 class ArcGISFeatureServerResource(ConfigurableResource):
+    """
+    Resource for querying an ArcGIS FeatureServer and returning data as a GeoDataFrame.
+    """
 
     def fetch_data(self, url: str, params: dict, crs: str = 'EPSG:4326', context=None) -> gpd.GeoDataFrame:
         """
@@ -292,11 +295,17 @@ class ArcGISFeatureServerResource(ConfigurableResource):
         params['resultOffset'] = 0  # Start from the first record
 
         max_record_count = params.get('maxRecordCount', None)
-
+        
+        api_response = None
+        
         while True:
             try:
                 response = requests.get(url, params=params)
                 response.raise_for_status()
+                
+                if api_response is None:
+                    api_response = f"<Response [{response.status_code}]>"  # Store the response code
+
                 data = response.json()
 
                 if 'error' in data:
@@ -352,8 +361,32 @@ class ArcGISFeatureServerResource(ConfigurableResource):
         
         if context:
             context.log.info(f"Retrieved GeoDataFrame with {len(gdf)} features.")
-        else:
-            print(f"Retrieved GeoDataFrame with {len(gdf)} features.")
+        
+            # Add metadata
+            metadata = {
+                "api_endpoint_url": MetadataValue.text(url),
+                "api_query_params": MetadataValue.json(params),
+                "api_response": MetadataValue.text(api_response),
+                "api_num_features": MetadataValue.int(len(gdf)),
+                "api_features_preview": MetadataValue.md(self._get_features_preview(gdf)),
+                "api_columns": MetadataValue.json(list(gdf.columns))
+            }
+            context.add_output_metadata(metadata)
         
         return gdf
-    
+
+    def _get_features_preview(self, gdf: gpd.GeoDataFrame, n: int = 5) -> str:
+        """
+        Generate a preview of the GeoDataFrame, excluding the 'geometry' column if it exists.
+
+        Args:
+            gdf (gpd.GeoDataFrame): The GeoDataFrame to generate a preview for.
+            n (int): The number of rows to include in the preview.
+
+        Returns:
+            str: The markdown representation of the preview.
+        """
+        preview_df = gdf.head(n).copy()
+        if 'geometry' in preview_df.columns:
+            preview_df = preview_df.drop(columns=['geometry'])
+        return preview_df.to_markdown()

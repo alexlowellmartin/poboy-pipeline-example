@@ -111,7 +111,7 @@ def trunk_median_income(context: AssetExecutionContext, r2_datastore: Cloudflare
     med_income_tracts_key = "landing/census_bureau/vector/tx_med_household_income/full_snapshots/snapshot=2024-07-14T15:29:10.742535.geoparquet"
     med_income_tracts = r2_datastore.read_gpq_single_key(context, med_income_tracts_key)
     
-    combined_gdf = gpd.sjoin(med_income_tracts, trunk_system, how="inner", op="intersects")
+    combined_gdf = gpd.sjoin(med_income_tracts, trunk_system, how="inner", predicate="intersects")
     
     r2_datastore.write_gpq(context, combined_gdf)
     return combined_gdf
