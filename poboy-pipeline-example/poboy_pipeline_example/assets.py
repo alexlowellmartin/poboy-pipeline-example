@@ -1,7 +1,8 @@
-from dagster import asset, AssetExecutionContext, AssetIn, TimeWindowPartitionsDefinition, AssetKey, AssetMaterialization
+from dagster import asset, AssetExecutionContext, TimeWindowPartitionsDefinition
 import geopandas as gpd
 from datetime import datetime
 from .resources import CloudflareR2DataStore, ArcGISFeatureServerResource
+
 
 # Define yearly partitions starting from 2023
 yearly_partitions = TimeWindowPartitionsDefinition(
@@ -70,21 +71,13 @@ def texas_county_boundaries(context: AssetExecutionContext, feature_server: ArcG
 def tx_med_household_income(context: AssetExecutionContext, feature_server: ArcGISFeatureServerResource, r2_datastore: CloudflareR2DataStore):
     """Fetches American Community Survey (ACS) median household income by census tract in Texas."""
     
-    # Define envelope bounding box
-    envelope = "-106.645646, 25.837377, -93.508292, 36.500704"
-    
     # Define query
     url="https://services.arcgis.com/P3ePLMYs2RVChkJx/ArcGIS/rest/services/ACS_Median_Income_by_Race_and_Age_Selp_Emp_Boundaries/FeatureServer/2/query?"
     params = {
-        "geometryType": "esriGeometryEnvelope",
-        "geometry": envelope, 
-        'where': '1=1',
+        'where': "State='Texas'",
         'outFields': '*',
         'f': 'geojson',
-        "inSR": "4326",
-        "spatialRel": "esriSpatialRelIntersects",
         "returnGeometry": "true", 
-        "outSR": "4326",
     }
     
     # Fetch data
@@ -111,7 +104,20 @@ def trunk_median_income(context: AssetExecutionContext, r2_datastore: Cloudflare
     med_income_tracts_key = "landing/census_bureau/vector/tx_med_household_income/full_snapshots/snapshot=2024-07-14T15:29:10.742535.geoparquet"
     med_income_tracts = r2_datastore.read_gpq_single_key(context, med_income_tracts_key)
     
+    # Fetch counties
+    tx_counties_pattern = 'landing/txdot/vector/texas_county_boundaries/full_snapshots'
+    tx_counties = r2_datastore.read_gpq_latest_snapshot(context, tx_counties_pattern)
+    
+    # Filter counties
+    county_list = ['Williamson','Travis', 'Hays', 'Bell','Milam', 'Lee', 'Bastrop', 'Caldwell', 'Guadalupe', 'Gonzales', 'Bexar', 'Comal', 'Fayette', 'Wilson']
+    tx_counties = tx_counties[tx_counties['CNTY_NM'].isin(county_list)]
+
+    # Join median income tracts to trunk system
     combined_gdf = gpd.sjoin(med_income_tracts, trunk_system, how="inner", predicate="intersects")
+    
+    # Clip combined gdf to only our desired county boundary areas
+    combined_gdf = combined_gdf.clip(tx_counties)
+
     
     r2_datastore.write_gpq(context, combined_gdf)
     return combined_gdf

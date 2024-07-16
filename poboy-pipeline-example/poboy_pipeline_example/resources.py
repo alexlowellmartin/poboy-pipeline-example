@@ -1,4 +1,4 @@
-from dagster import ConfigurableResource, AssetExecutionContext, AssetKey, MetadataValue, AssetMaterialization, Output, AssetObservation
+from dagster import ConfigurableResource, AssetExecutionContext, MetadataValue
 import requests
 import json
 import boto3
@@ -14,7 +14,7 @@ def format_size(size_bytes):
 
 class CloudflareR2DataStore(ConfigurableResource):
     """
-    Custom IO Manager for handling GeoParquet files stored in Cloudflare R2.
+    Custom resource for handling GeoParquet files stored in Cloudflare R2.
 
     This manager supports various partition types and handles cases where data might be missing.
 
