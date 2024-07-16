@@ -7,6 +7,7 @@ setup(
         "dagster",
         "dagster-cloud",
         "fused",
+        "pandas",
         "geopandas",
         "boto3",
     ],

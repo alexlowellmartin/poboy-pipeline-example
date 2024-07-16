@@ -3,7 +3,7 @@
 # poboy-pipeline-example
 
 ## Overview
-Building a po' boy's spatial data pipeline from scratch with Dagster, geoparquet, &amp; R2. (This is an example)
+Here I build a simple geospatial data pipeline to fetch data from ArcGIS Feature Servers and write / read it to GeoParquet in Cloudflare R2. (This is an example - please [read my write-up](https://alexlowellmartin.com/building-a-po-boys-spatial-data-pipeline-from-scratch-with-dagster-geoparquet-r2-2/) for a thorough walk through of my rationale and development process.)
 
 ## External links
 * [Building a po' boy's spatial data pipeline from scratch with Dagster, GeoParquet, & R2](https://alexlowellmartin.com/building-a-po-boys-spatial-data-pipeline-from-scratch-with-dagster-geoparquet-r2-2/)
