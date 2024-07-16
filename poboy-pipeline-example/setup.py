@@ -6,6 +6,7 @@ setup(
     install_requires=[
         "dagster",
         "dagster-cloud",
+        "fused",
         "geopandas",
         "boto3",
     ],
