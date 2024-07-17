@@ -1,4 +1,4 @@
-<p align="center"><img src="https://github.com/alexlowellmartin/poboy-pipeline-example/blob/8ad801d055bd1937c47baef1244b198455b8da11/poboy-pipeline-example-dag.png" width="600" alt="DAG preview image"></p>
+<p align="center"><img src="https://github.com/alexlowellmartin/poboy-pipeline-example/blob/f28700fbf7fc6fad129fad7d850b009e418928b9/poboy-pipeline-example-dag.png" width="600" alt="DAG preview image"></p>
 
 # poboy-pipeline-example
 
