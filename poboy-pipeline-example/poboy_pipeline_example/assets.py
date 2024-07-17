@@ -91,7 +91,7 @@ def tx_med_household_income(context: AssetExecutionContext, feature_server: ArcG
 @asset(
     group_name='analytics',
     metadata={"layer": "enriched", "source": "analytics", "data_category": "vector", "segmentation": "full_snapshots"},
-    deps = [texas_trunk_system, tx_med_household_income]
+    deps = [texas_trunk_system, tx_med_household_income, texas_county_boundaries]
 )
 def trunk_median_income(context: AssetExecutionContext, r2_datastore: CloudflareR2DataStore):
     """Joins Texas trunk system to median household income. Filters by select counties."""
@@ -118,6 +118,6 @@ def trunk_median_income(context: AssetExecutionContext, r2_datastore: Cloudflare
     # Clip combined gdf to only our desired county boundary areas
     combined_gdf = combined_gdf.clip(tx_counties)
 
-    
     r2_datastore.write_gpq(context, combined_gdf)
+    
     return combined_gdf
